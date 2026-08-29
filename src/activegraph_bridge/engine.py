@@ -19,7 +19,7 @@ first time is served back to it byte-identically.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -33,6 +33,7 @@ from ._canonical import content_hash
 from ._store import BridgeStore
 from .codecs import EffectCodec
 from .errors import (
+    BridgeConfigurationError,
     EffectBlockedError,
     ReconstructionError,
     ReplayDivergence,
@@ -44,7 +45,17 @@ from .determinism import runtime_fingerprint
 from .script import Cursor, EffectScript, InvocationEntry
 from .session import ExecutionSession, ForkOverride, SessionMode
 
-__all__ = ["WrapSpec", "Recording", "record_invoke", "shadow_verify", "fork_execute"]
+__all__ = [
+    "WrapSpec",
+    "Recording",
+    "record_invoke",
+    "arecord_invoke",
+    "shadow_verify",
+    "ashadow_verify",
+    "fork_execute",
+    "afork_execute",
+    "requires_async_drive",
+]
 
 
 @dataclass
@@ -229,6 +240,10 @@ async def arecord_invoke(
     try:
         with spec.adapter.instrument(agent, session):
             output = await spec.adapter.ainvoke(agent, method, args, kwargs)
+            if isinstance(output, AsyncIterator):
+                return _record_astream(session, inv, output)
+            if isinstance(output, Iterator):
+                return _record_stream(session, inv, output)
     except BaseException as exc:
         session.finish_invocation(inv, error=exc)
         raise
@@ -243,6 +258,25 @@ def _record_stream(session: ExecutionSession, inv: Any, stream: Any) -> Any:
         chunks: list[Any] = []
         try:
             for chunk in stream:
+                chunks.append(chunk)
+                yield chunk
+        except BaseException as exc:
+            session.finish_invocation(inv, error=exc)
+            raise
+        session.finish_invocation(inv, output={"stream": True, "chunks": chunks})
+
+    return generator()
+
+
+def _record_astream(
+    session: ExecutionSession, inv: Any, stream: AsyncIterator[Any]
+) -> AsyncIterator[Any]:
+    """Tee an async stream while preserving chunk order and session effects."""
+
+    async def generator() -> AsyncIterator[Any]:
+        chunks: list[Any] = []
+        try:
+            async for chunk in stream:
                 chunks.append(chunk)
                 yield chunk
         except BaseException as exc:
@@ -386,6 +420,67 @@ def shadow_verify(
     )
 
 
+async def ashadow_verify(
+    spec: WrapSpec,
+    events: list,
+    run_id: str,
+    *,
+    agent: Any | None = None,
+    match: str | None = None,
+) -> VerificationResult:
+    """Async counterpart to :func:`shadow_verify` for any invocation surface."""
+    script = EffectScript.from_events(events)
+    cursor = Cursor(script, match=match or spec.match)
+    session = ExecutionSession(
+        mode=SessionMode.SHADOW,
+        cursor=cursor,
+        policy=spec.policy,
+        codec=spec.codec,
+        run_id=run_id,
+    )
+    agent = _require_reconstructable(spec, agent, "verify()")
+    top_level = script.top_level_invocations()
+    divergence: Exception | None = None
+    try:
+        with session:
+            for start, _end in top_level:
+                await _adrive_invocation(session, spec, agent, start)
+            leftover = cursor.remaining_effects()
+            if leftover:
+                raise ReplayDivergence(
+                    "re-execution finished with recorded effects left unserved",
+                    expected={
+                        "next": {
+                            "kind": leftover[0].kind,
+                            "name": leftover[0].name,
+                            "event": leftover[0].request_event_id,
+                        },
+                        "remaining": len(leftover),
+                    },
+                    got={},
+                )
+    except (ReplayDivergence, UnrecordedEffectError) as exc:
+        divergence = exc
+
+    return VerificationResult(
+        ok=divergence is None,
+        run_id=run_id,
+        effects_served=session.effects_served,
+        invocations=len(top_level),
+        reordered=len(cursor.reordered),
+        divergence=divergence,
+        findings=list(session.findings),
+    )
+
+
+def requires_async_drive(events: list) -> bool:
+    """Whether a recording contains a natively asynchronous invocation."""
+    return any(
+        start.method in {"ainvoke", "arun", "astream"}
+        for start, _end in EffectScript.from_events(events).top_level_invocations()
+    )
+
+
 def _drive_invocation(
     session: ExecutionSession,
     spec: WrapSpec,
@@ -411,13 +506,67 @@ def _drive_invocation(
     try:
         with spec.adapter.instrument(agent, session):
             output = spec.adapter.invoke(agent, start.method, args, kwargs)
+            if inspect.isawaitable(output) or isinstance(output, AsyncIterator):
+                if inspect.iscoroutine(output):
+                    output.close()
+                raise BridgeConfigurationError(
+                    "an asynchronous invocation requires the async execution path",
+                    what_failed=(
+                        f"The recorded {start.method!r} invocation returned an "
+                        "awaitable while a synchronous verify/fork driver was active."
+                    ),
+                    why="Async agent code must be awaited so its recorded effects execute.",
+                    how_to_fix="Use `await run.averify()` or `await fork.aexecute()`.",
+                )
             if isinstance(output, Iterator):
                 output = {"stream": True, "chunks": list(output)}
-    except (ReplayDivergence, UnrecordedEffectError):
+    except (BridgeConfigurationError, ReplayDivergence, UnrecordedEffectError):
         raise
     except EffectBlockedError as exc:
         # A policy refusal is the caller's decision point, not an agent
         # failure to record and move past: land it in the log, then raise.
+        session.finish_invocation(inv, error=exc)
+        raise
+    except BaseException as exc:
+        session.finish_invocation(inv, error=exc)
+        return None
+    session.finish_invocation(inv, output=output)
+    return output
+
+
+async def _adrive_invocation(
+    session: ExecutionSession,
+    spec: WrapSpec,
+    agent: Any,
+    start: InvocationEntry,
+    *,
+    input_override: Any = None,
+) -> Any:
+    """Await and re-drive one invocation, consuming sync or async streams."""
+    if input_override is not None:
+        encoded = session.codec.encode_request(input_override)
+        args, kwargs = _decode_input(session.codec, encoded)
+        inv = session.begin_invocation(
+            method=start.method, encoded_input=encoded, input_hash=content_hash(encoded)
+        )
+    else:
+        args, kwargs = _decode_input(session.codec, start.input)
+        inv = session.begin_invocation(
+            method=start.method,
+            encoded_input=start.input,
+            input_hash=start.input_hash or None,
+        )
+    try:
+        with spec.adapter.instrument(agent, session):
+            output = await spec.adapter.ainvoke(agent, start.method, args, kwargs)
+            if isinstance(output, AsyncIterator):
+                chunks = [chunk async for chunk in output]
+                output = {"stream": True, "chunks": chunks}
+            elif isinstance(output, Iterator):
+                output = {"stream": True, "chunks": list(output)}
+    except (ReplayDivergence, UnrecordedEffectError):
+        raise
+    except EffectBlockedError as exc:
         session.finish_invocation(inv, error=exc)
         raise
     except BaseException as exc:
@@ -496,6 +645,70 @@ def fork_execute(
                     input_override = override.input
                 outputs.append(
                     _drive_invocation(
+                        session, spec, agent, start, input_override=input_override
+                    )
+                )
+    except BaseException:
+        status = "failed"
+        session.finalize(status=status)
+        raise
+    session.finalize(status=status)
+    return (outputs[-1] if outputs else None), session
+
+
+async def afork_execute(
+    spec: WrapSpec,
+    *,
+    child_run_id: str,
+    parent_events: list,
+    override: ForkOverride | None,
+    side_effects: str,
+    agent: Any | None = None,
+    match: str | None = None,
+) -> tuple[Any, ExecutionSession]:
+    """Async fork execution with the same prefix and policy semantics."""
+    child_events = spec.store.load_events(child_run_id)
+    prefix_script = EffectScript.from_events(child_events)
+    cursor = Cursor(prefix_script, match=match or spec.match)
+
+    graph = Graph(ids=IDGen(), clock=spec.clock_factory(), run_id=child_run_id)
+    replay_into(graph, child_events)
+    graph.ids.reseed_from_events(child_events)
+    graph.attach_store(spec.store.open_run(child_run_id))
+
+    policy = spec.policy
+    if side_effects == "live":
+        from dataclasses import replace
+
+        policy = replace(policy, on_fork_write=policy.on_write)
+
+    projector = spec.projector_factory() if spec.projector_factory else None
+    session = ExecutionSession(
+        mode=SessionMode.PREFIX,
+        graph=graph,
+        cursor=cursor,
+        policy=policy,
+        codec=spec.codec,
+        projector=projector,
+        override=override,
+    )
+    agent = _require_reconstructable(spec, agent, "fork.execute()")
+
+    full_script = EffectScript.from_events(parent_events)
+    outputs: list[Any] = []
+    status = "completed"
+    try:
+        with session:
+            for start, _end in full_script.top_level_invocations():
+                input_override = None
+                if (
+                    override is not None
+                    and override.has_input
+                    and override.target_event_id == start.start_event_id
+                ):
+                    input_override = override.input
+                outputs.append(
+                    await _adrive_invocation(
                         session, spec, agent, start, input_override=input_override
                     )
                 )

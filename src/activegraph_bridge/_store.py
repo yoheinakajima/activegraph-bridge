@@ -15,10 +15,13 @@ The bridge stores runs in ordinary ActiveGraph event stores:
 
 from __future__ import annotations
 
+import os
+import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional, TypeVar
 
 from activegraph.core.event import Event
 from activegraph.store.base import RunRecord
@@ -27,6 +30,8 @@ from activegraph.store.sqlite import SQLiteEventStore
 from .errors import BridgeConfigurationError
 
 __all__ = ["BridgeStore", "resolve_store"]
+
+_T = TypeVar("_T")
 
 
 def _now_iso() -> str:
@@ -84,9 +89,29 @@ class BridgeStore:
 
 
 class SqliteBridgeStore(BridgeStore):
+    _locks_guard = threading.Lock()
+    _locks: dict[str, threading.RLock] = {}
+
     def __init__(self, path: str, url: str) -> None:
         self.path = path
         self.url = url
+        lock_key = os.path.realpath(os.path.abspath(path))
+        with self._locks_guard:
+            self._lock = self._locks.setdefault(lock_key, threading.RLock())
+
+    def _retry_locked(self, operation: Callable[[], _T]) -> _T:
+        """Serialize local opens and retry brief cross-process SQLite races."""
+        delay = 0.01
+        for attempt in range(8):
+            try:
+                with self._lock:
+                    return operation()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 7:
+                    raise
+                time.sleep(delay)
+                delay *= 2
+        raise AssertionError("unreachable")
 
     def create_run(
         self,
@@ -97,36 +122,49 @@ class SqliteBridgeStore(BridgeStore):
         parent_run_id: str | None = None,
         forked_at_event_id: str | None = None,
     ) -> SQLiteEventStore:
-        store = SQLiteEventStore(self.path, run_id=run_id)
-        store.upsert_run(
-            parent_run_id=parent_run_id,
-            forked_at_event_id=forked_at_event_id,
-            label=label,
-            created_at=_now_iso(),
-            goal=goal,
-        )
-        return store
+        def create() -> SQLiteEventStore:
+            store = SQLiteEventStore(self.path, run_id=run_id)
+            try:
+                store.upsert_run(
+                    parent_run_id=parent_run_id,
+                    forked_at_event_id=forked_at_event_id,
+                    label=label,
+                    created_at=_now_iso(),
+                    goal=goal,
+                )
+            except BaseException:
+                store.close()
+                raise
+            return store
+
+        return self._retry_locked(create)
 
     def open_run(self, run_id: str) -> SQLiteEventStore:
-        return SQLiteEventStore(self.path, run_id=run_id)
+        return self._retry_locked(
+            lambda: SQLiteEventStore(self.path, run_id=run_id)
+        )
 
     def fork_run(
         self, *, parent_run_id: str, new_run_id: str, at_event_id: str, label: str | None
     ) -> int:
-        return SQLiteEventStore.fork_run(
-            self.path,
-            parent_run_id=parent_run_id,
-            new_run_id=new_run_id,
-            at_event_id=at_event_id,
-            label=label,
-            created_at=_now_iso(),
+        return self._retry_locked(
+            lambda: SQLiteEventStore.fork_run(
+                self.path,
+                parent_run_id=parent_run_id,
+                new_run_id=new_run_id,
+                at_event_id=at_event_id,
+                label=label,
+                created_at=_now_iso(),
+            )
         )
 
     def list_runs(self) -> list[RunRecord]:
-        return SQLiteEventStore.list_runs(self.path)
+        return self._retry_locked(lambda: SQLiteEventStore.list_runs(self.path))
 
     def most_recent_run_id(self) -> str | None:
-        return SQLiteEventStore.most_recent_run_id(self.path)
+        return self._retry_locked(
+            lambda: SQLiteEventStore.most_recent_run_id(self.path)
+        )
 
 
 # --------------------------------------------------------------------------- #

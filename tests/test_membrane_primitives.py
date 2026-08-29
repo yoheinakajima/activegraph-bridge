@@ -3,10 +3,15 @@ nested agents, async, streaming, checkpoints, and the decorator form."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import threading
+
+import pytest
 
 from activegraph_bridge import (
     AttrBox,
+    BridgeConfigurationError,
     checkpoint,
     effect,
     instrument,
@@ -15,7 +20,7 @@ from activegraph_bridge import (
 )
 from activegraph_bridge.codecs import AutoCodec
 from activegraph_bridge.testing import assert_verified
-from tests.conftest import lookup_order, make_factory
+from tests.conftest import TOOL_CALLS, lookup_order, make_factory
 
 
 def test_effect_passthrough_outside_session():
@@ -184,6 +189,80 @@ def test_openai_preset_shapes(store_url):
     assert run.events.model_call(1).kind == "openai.chat.completions.create"
 
 
+async def test_async_openai_preset_records_and_verifies(store_url):
+    class Responses:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            return {"output_text": kwargs["input"].upper()}
+
+    class FakeAsyncOpenAI:
+        def __init__(self):
+            self.responses = Responses()
+
+    raw = FakeAsyncOpenAI()
+
+    def build():
+        client = instrument.openai(raw)
+
+        class Agent:
+            async def ainvoke(self, payload):
+                response = await client.responses.create(
+                    model="gpt-x", input=payload["q"]
+                )
+                return {"answer": response["output_text"]}
+
+        return Agent()
+
+    agent = wrap(build, store=store_url)
+    output = await agent.ainvoke({"q": "hello"})
+    assert output == {"answer": "HELLO"}
+    before = raw.responses.calls
+    assert (await agent.last_run.averify()).ok
+    assert raw.responses.calls == before
+    assert agent.last_run.events.model_call(1).kind == "openai.responses.create"
+
+
+def test_anthropic_preset_records_and_verifies(store_url):
+    class Messages:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            return {"content": [{"text": kwargs["messages"][0]["content"].upper()}]}
+
+    class FakeAnthropic:
+        def __init__(self):
+            self.messages = Messages()
+
+    raw = FakeAnthropic()
+
+    def build():
+        client = instrument.anthropic(raw)
+
+        class Agent:
+            def invoke(self, payload):
+                response = client.messages.create(
+                    model="claude-x",
+                    max_tokens=8,
+                    messages=[{"role": "user", "content": payload["q"]}],
+                )
+                return {"answer": response["content"][0]["text"]}
+
+        return Agent()
+
+    agent = wrap(build, store=store_url)
+    output = agent.invoke({"q": "hello"})
+    assert output == {"answer": "HELLO"}
+    before = raw.messages.calls
+    assert agent.last_run.verify().ok
+    assert raw.messages.calls == before
+    assert agent.last_run.events.model_call(1).kind == "anthropic.messages.create"
+
+
 def test_nested_wrapped_agents_share_one_run(store_url):
     inner = wrap(make_factory(), store=store_url)
 
@@ -220,7 +299,45 @@ async def test_async_agent_roundtrip(store_url):
     agent = wrap(build, store=store_url)
     out = await agent.ainvoke({"order_id": "ord_1"})
     assert out == {"status": "delayed"}
-    assert agent.last_run.playback_output() == out
+    run = agent.last_run
+    assert run.playback_output() == out
+
+    before = TOOL_CALLS["lookup"]
+    result = await run.averify()
+    assert result.ok, result.divergence
+    assert result.effects_served == 1
+    assert TOOL_CALLS["lookup"] == before
+
+    fork = run.fork(
+        before=run.events.tool_call("lookup_order"),
+        overrides={"tool_result": {"status": "shipped"}},
+    )
+    assert await fork.aexecute() == {"status": "shipped"}
+
+    with pytest.raises(BridgeConfigurationError, match="event loop"):
+        run.verify(persist=False)
+
+
+def test_sync_helpers_drive_async_recordings_outside_event_loop(store_url):
+    def build():
+        class AsyncAgent:
+            async def ainvoke(self, payload):
+                return lookup_order(payload["order_id"])
+
+        return AsyncAgent()
+
+    agent = wrap(build, store=store_url)
+    asyncio.run(agent.ainvoke({"order_id": "ord_1"}))
+    run = agent.last_run
+    before = TOOL_CALLS["lookup"]
+    assert run.verify().ok
+    assert TOOL_CALLS["lookup"] == before
+
+    fork = run.fork(
+        before=run.events.tool_call("lookup_order"),
+        overrides={"tool_result": {"status": "shipped", "eta": None}},
+    )
+    assert fork.execute()["status"] == "shipped"
 
 
 def test_stream_recorded_and_played_back(store_url):
@@ -239,6 +356,40 @@ def test_stream_recorded_and_played_back(store_url):
     recorded = agent.last_run.playback_output()
     assert recorded == {"stream": True, "chunks": chunks}
     assert agent.last_run.verify().ok
+
+
+async def test_async_stream_recorded_verified_and_forked(store_url):
+    def build():
+        class Streamer:
+            async def astream(self, payload):
+                order = lookup_order(payload["order_id"])
+                for word in ("your", "order", "is", order["status"]):
+                    yield word
+
+        return Streamer()
+
+    agent = wrap(build, store=store_url)
+    chunks = [chunk async for chunk in agent.astream({"order_id": "ord_1"})]
+    assert chunks == ["your", "order", "is", "delayed"]
+
+    run = agent.last_run
+    assert run.playback_output() == {"stream": True, "chunks": chunks}
+    assert run.report.blockers == []
+    assert len(run.events.effects()) == 1
+
+    before = TOOL_CALLS["lookup"]
+    result = await run.averify()
+    assert result.ok, result.divergence
+    assert TOOL_CALLS["lookup"] == before
+
+    fork = run.fork(
+        before=run.events.tool_call("lookup_order"),
+        overrides={"tool_result": {"status": "shipped"}},
+    )
+    assert await fork.aexecute() == {
+        "stream": True,
+        "chunks": ["your", "order", "is", "shipped"],
+    }
 
 
 def test_checkpoint_recorded(store_url):
@@ -279,15 +430,19 @@ def test_recorded_agent_decorator(store_url):
 
 
 def test_concurrent_executions_are_isolated(store_url):
-    import threading
-
     agent = wrap(make_factory(), store=store_url)
     results: dict[str, str] = {}
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(2)
 
     def worker(name: str, order: str) -> None:
-        with agent.execution(label=name) as run:
-            agent.invoke({"order_id": order, "question": name})
-            results[name] = run.run_id
+        try:
+            barrier.wait()
+            with agent.execution(label=name) as run:
+                agent.invoke({"order_id": order, "question": name})
+                results[name] = run.run_id
+        except BaseException as exc:
+            errors.append(exc)
 
     threads = [
         threading.Thread(target=worker, args=("t1", "ord_1")),
@@ -297,4 +452,5 @@ def test_concurrent_executions_are_isolated(store_url):
         t.start()
     for t in threads:
         t.join()
+    assert errors == []
     assert len(set(results.values())) == 2  # two separate runs, no bleed

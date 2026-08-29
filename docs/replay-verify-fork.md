@@ -47,6 +47,15 @@ result.effects_served      # calls answered from the record
 result.divergence          # the ReplayDivergence, when not ok
 ```
 
+For a recording containing `ainvoke` or `astream`, synchronous code may
+still call `run.verify()`; it drives the async execution in a private
+event loop. Code already running in an event loop uses the native async
+form instead:
+
+```python
+result = await run.averify()
+```
+
 Success appends a `bridge.verification` event, so `run.report` shows
 `boundary-verified` from then on — in any process that loads the run.
 
@@ -67,6 +76,10 @@ alternative = fork.execute()
 child = fork.run                    # a full Run: report, replay, verify, fork again
 diff = run.diff(fork)
 ```
+
+Async agent surfaces use `alternative = await fork.aexecute()`. As with
+verification, `fork.execute()` remains a convenience for synchronous
+callers that are not already inside an event loop.
 
 What `fork()` does at creation time:
 

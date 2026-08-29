@@ -7,8 +7,13 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+coverage.xml
 .venv/
 venv/
+.env
+.env.*
+!.env.example
 *.db
 *.sqlite
 *.sqlite3

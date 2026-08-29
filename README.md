@@ -216,6 +216,18 @@ agent = wrap(build_agent, projector=SupportCaseProjector())   # your GraphProjec
   replay turns 1..n-1 from the record.
 - **Async and streams**: `ainvoke`/`astream` mirror the sync surface;
   streamed invocations record their chunk sequence and assembled output.
+  In async application code, use `await run.averify()` and
+  `await fork.aexecute()`; the synchronous helpers automatically drive
+  async recordings only when no event loop is already running.
+
+```python
+answer = await agent.ainvoke(payload)
+chunks = [chunk async for chunk in agent.astream(payload)]
+assert (await agent.last_run.averify()).ok
+
+fork = agent.last_run.fork(before=agent.last_run.events.model_call(1))
+alternative = await fork.aexecute()
+```
 - **Adapters**: framework-specific knowledge (middleware hooks,
   checkpoint/restore) lives behind the small `AgentAdapter` protocol and
   the `activegraph_bridge.adapters` entry-point group, so integrations

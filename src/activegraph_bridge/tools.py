@@ -134,5 +134,5 @@ def wrap_tool(
 
     wrapper.tool_name = tool_name  # type: ignore[attr-defined]
     wrapper.side_effect = side_effect  # type: ignore[attr-defined]
-    wrapper.__wrapped__ = fn
+    setattr(wrapper, "__wrapped__", fn)
     return wrapper

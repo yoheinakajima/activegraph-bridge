@@ -33,6 +33,7 @@ import platform
 import sys
 import sysconfig
 import threading
+from types import FrameType
 from typing import Any
 
 __all__ = ["ensure_guard_installed", "runtime_fingerprint"]
@@ -100,7 +101,7 @@ def _describe(event: str, args: tuple[Any, ...]) -> str:
 
 def _caller_location() -> str:
     """First stack frame outside the bridge, stdlib, and activegraph."""
-    frame = sys._getframe()
+    frame: FrameType | None = sys._getframe()
     try:
         while frame is not None:
             filename = frame.f_code.co_filename

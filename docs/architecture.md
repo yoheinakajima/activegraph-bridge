@@ -94,11 +94,12 @@ without ever inventing a response).
 
 One machine, three shapes:
 
-- `record_invoke` — drive one invocation against any session.
-- `shadow_verify` — fresh agent, recorded inputs, full-script
-  consumption check, `VerificationResult`.
-- `fork_execute` — prefix cursor over the child's inherited events,
-  override application, live tail into the child store.
+- `record_invoke` / `arecord_invoke` — drive one invocation against any
+  session, teeing sync or async stream chunks into the envelope.
+- `shadow_verify` / `ashadow_verify` — fresh agent, recorded inputs,
+  full-script consumption check, `VerificationResult`.
+- `fork_execute` / `afork_execute` — prefix cursor over the child's
+  inherited events, override application, live tail into the child store.
 
 Verification and forking **re-execute real agent code**. That is
 deliberate: re-execution is what reconstructs hidden Python state

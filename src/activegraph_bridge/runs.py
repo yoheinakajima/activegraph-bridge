@@ -27,8 +27,9 @@ call") to real event ids::
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Coroutine, TypeVar
 
 from activegraph.core.clock import Clock
 from activegraph.core.event import Event
@@ -43,7 +44,10 @@ from .codecs import AutoCodec, EffectCodec
 from .engine import (
     VerificationResult,
     WrapSpec,
+    afork_execute,
+    ashadow_verify,
     fork_execute,
+    requires_async_drive,
     shadow_verify,
 )
 from .errors import (
@@ -56,6 +60,24 @@ from .report import ReplayabilityReport, compute_report
 from .session import ForkOverride
 
 __all__ = ["Run", "Fork", "RunDiff", "Replay", "EventRef", "load_run", "list_runs"]
+
+_T = TypeVar("_T")
+
+
+def _run_async_operation(
+    operation: Callable[[], Coroutine[Any, Any, _T]], *, async_api: str
+) -> _T:
+    """Run async work from sync APIs only when no event loop is active."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(operation())
+    raise BridgeConfigurationError(
+        "the synchronous API cannot drive async agent code inside an event loop",
+        what_failed="A recorded async invocation was opened through a sync operation.",
+        why="Starting a nested event loop would be unsafe and is rejected by asyncio.",
+        how_to_fix=f"Use `{async_api}` in async code.",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -409,24 +431,34 @@ class Run:
         shows ``boundary-verified`` from now on, in any process.
         """
         spec = self._require_spec("verify()")
-        result = shadow_verify(
+        events = self.raw_events()
+        if requires_async_drive(events):
+            result = _run_async_operation(
+                lambda: ashadow_verify(
+                    spec, events, self.run_id, agent=agent, match=match
+                ),
+                async_api="await run.averify()",
+            )
+        else:
+            result = shadow_verify(
+                spec, events, self.run_id, agent=agent, match=match
+            )
+        self._persist_verification(result, persist=persist)
+        return result
+
+    async def averify(
+        self,
+        agent: Any = None,
+        *,
+        match: str | None = None,
+        persist: bool = True,
+    ) -> VerificationResult:
+        """Awaitable verification for async code and async agent surfaces."""
+        spec = self._require_spec("averify()")
+        result = await ashadow_verify(
             spec, self.raw_events(), self.run_id, agent=agent, match=match
         )
-        if persist:
-            self._append_meta(
-                ev.VERIFICATION_RECORDED,
-                {
-                    "ok": result.ok,
-                    "effects_served": result.effects_served,
-                    "invocations": result.invocations,
-                    "reordered": result.reordered,
-                    "divergence": (
-                        str(result.divergence).splitlines()[0]
-                        if result.divergence
-                        else None
-                    ),
-                },
-            )
+        self._persist_verification(result, persist=persist)
         return result
 
     def fork(
@@ -655,6 +687,26 @@ class Run:
             )
         )
 
+    def _persist_verification(
+        self, result: VerificationResult, *, persist: bool
+    ) -> None:
+        if not persist:
+            return
+        self._append_meta(
+            ev.VERIFICATION_RECORDED,
+            {
+                "ok": result.ok,
+                "effects_served": result.effects_served,
+                "invocations": result.invocations,
+                "reordered": result.reordered,
+                "divergence": (
+                    str(result.divergence).splitlines()[0]
+                    if result.divergence
+                    else None
+                ),
+            },
+        )
+
 
 # --------------------------------------------------------------------------- #
 # forks                                                                        #
@@ -695,19 +747,41 @@ class Fork:
         """Re-execute to the fork point on recorded effects, apply the
         override, and record the divergent tail. Returns the (last)
         invocation's output."""
-        if self.executed:
-            raise BridgeConfigurationError(
-                "this fork has already executed; fork the parent again for a new branch",
-                what_failed="Fork.execute() was called twice on the same fork.",
-                why=(
-                    "A fork's child log already contains its divergent tail after "
-                    "the first execution; running again would append a second, "
-                    "interleaved tail and corrupt the branch."
-                ),
-                how_to_fix="Call run.fork(...) again to create a fresh branch.",
-            )
+        self._ensure_not_executed("Fork.execute()")
         spec = self.parent._require_spec("fork.execute()")
-        output, _session = fork_execute(
+        parent_events = self.parent.raw_events()
+        if requires_async_drive(parent_events):
+            output, _session = _run_async_operation(
+                lambda: afork_execute(
+                    spec,
+                    child_run_id=self.child_run_id,
+                    parent_events=parent_events,
+                    override=self.override,
+                    side_effects=self.side_effects,
+                    agent=agent,
+                    match=match,
+                ),
+                async_api="await fork.aexecute()",
+            )
+        else:
+            output, _session = fork_execute(
+                spec,
+                child_run_id=self.child_run_id,
+                parent_events=parent_events,
+                override=self.override,
+                side_effects=self.side_effects,
+                agent=agent,
+                match=match,
+            )
+        self.executed = True
+        self.output = output
+        return output
+
+    async def aexecute(self, agent: Any = None, *, match: str | None = None) -> Any:
+        """Awaitable fork execution for async code and agent surfaces."""
+        self._ensure_not_executed("Fork.aexecute()")
+        spec = self.parent._require_spec("fork.aexecute()")
+        output, _session = await afork_execute(
             spec,
             child_run_id=self.child_run_id,
             parent_events=self.parent.raw_events(),
@@ -719,6 +793,20 @@ class Fork:
         self.executed = True
         self.output = output
         return output
+
+    def _ensure_not_executed(self, operation: str) -> None:
+        if not self.executed:
+            return
+        raise BridgeConfigurationError(
+            "this fork has already executed; fork the parent again for a new branch",
+            what_failed=f"{operation} was called after this fork already executed.",
+            why=(
+                "A fork's child log already contains its divergent tail after "
+                "the first execution; running again would append a second, "
+                "interleaved tail and corrupt the branch."
+            ),
+            how_to_fix="Call run.fork(...) again to create a fresh branch.",
+        )
 
     def diff(self) -> "RunDiff":
         return self.parent.diff(self)
