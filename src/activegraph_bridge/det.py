@@ -39,6 +39,9 @@ def _mediate(kind: str, request: dict, live: object) -> object:
         live if callable(live) else (lambda: live),
         name=kind,
         side_effect="read",
+        footprint="pure",
+        replay_source="recorded",
+        observables=(),
         category="determinism",
     )
 

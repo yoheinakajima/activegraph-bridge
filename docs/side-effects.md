@@ -5,6 +5,18 @@ re-sent an email would make "replay" a dangerous word, so the bridge is
 **fail-closed**: writes never execute in any serving mode, and fork
 tails block them unless you decide otherwise.
 
+Execution policy and replay semantics are separate. Each request now records:
+
+- `footprint`: `pure | idempotent | compensatable | one_shot | unknown`;
+- `replay_source`: `deterministic | recorded | uncaptured`;
+- lifecycle: `requested`, followed by `committed` or `failed`;
+- `observables`: property-scoped external surfaces affected or consulted.
+
+A provider-model call is `side_effect="read"` for mutation policy but
+`footprint="one_shot"` for cost/oracle semantics and
+`replay_source="recorded"` when its response is captured. This is why a prefix
+can serve the result while a new fork-tail model call is blocked by default.
+
 ## Declaring
 
 Every effect carries a class:
@@ -28,6 +40,15 @@ counts it so you can tighten declarations over time.
 | Fork prefix | served from record | **never executes** (not configurable) |
 | Fork tail | execute + record | `SideEffectPolicy.on_fork_write` — default `block`; also `simulate`, `approval`, `execute` |
 | Explicitly live fork | execute + record | `run.fork(..., side_effects="live")` — the tail writes like a live recording |
+
+One-shot reads have an additional fail-closed fork-tail policy. To authorize a
+new oracle interaction explicitly:
+
+```python
+policy = SideEffectPolicy(on_fork_one_shot="execute")
+```
+
+This does not authorize writes; `on_fork_write` remains independent.
 
 ## Configuring
 

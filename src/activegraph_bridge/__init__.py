@@ -57,7 +57,14 @@ from .errors import (
     ReplayedEffectFailure,
     UnrecordedEffectError,
 )
-from .policy import SideEffectPolicy
+from .policy import Footprint, ReplaySource, SideEffectPolicy
+from .receipts import (
+    EnvironmentAttestation,
+    ForkReceipt,
+    HmacEnvironmentAttestor,
+    ReceiptVerification,
+    verify_fork_receipt,
+)
 from .projection import DefaultProjector, GraphProjector
 from .report import Finding, Grade, ReplayabilityReport
 from .runs import EventRef, Fork, Replay, Run, RunDiff, list_runs, load_run
@@ -65,7 +72,7 @@ from .session import ExecutionSession, aeffect, checkpoint, current_session, eff
 from .tools import bridge_tool, wrap_tool
 from .wrapper import WrappedAgent, recorded_agent, wrap
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # the front door
@@ -93,6 +100,13 @@ __all__ = [
     "instrument",
     # policy, codecs, projection
     "SideEffectPolicy",
+    "Footprint",
+    "ReplaySource",
+    "EnvironmentAttestation",
+    "ForkReceipt",
+    "HmacEnvironmentAttestor",
+    "ReceiptVerification",
+    "verify_fork_receipt",
     "EffectCodec",
     "AutoCodec",
     "JsonCodec",

@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from ._canonical import content_hash
 from .codecs import EffectCodec
-from .policy import SideEffect
+from .policy import Footprint, ReplaySource, SideEffect
 from .session import current_session
 
 __all__ = ["bridge_tool", "wrap_tool"]
@@ -49,12 +49,23 @@ def bridge_tool(
     *,
     name: str | None = None,
     side_effect: SideEffect = "unknown",
+    footprint: Footprint | None = None,
+    replay_source: ReplaySource = "recorded",
+    observables: tuple[str, ...] = (),
     codec: EffectCodec | None = None,
 ) -> Any:
     """Declare a function as a mediated tool. See module docstring."""
 
     def apply(f: Callable) -> Callable:
-        return wrap_tool(f, name=name, side_effect=side_effect, codec=codec)
+        return wrap_tool(
+            f,
+            name=name,
+            side_effect=side_effect,
+            footprint=footprint,
+            replay_source=replay_source,
+            observables=observables,
+            codec=codec,
+        )
 
     if fn is not None:
         return apply(fn)
@@ -66,6 +77,9 @@ def wrap_tool(
     *,
     name: str | None = None,
     side_effect: SideEffect = "unknown",
+    footprint: Footprint | None = None,
+    replay_source: ReplaySource = "recorded",
+    observables: tuple[str, ...] = (),
     codec: EffectCodec | None = None,
 ) -> Callable:
     """Function form of :func:`bridge_tool` (useful for tools you import)."""
@@ -107,6 +121,9 @@ def wrap_tool(
                 lambda: fn(*args, **call_kwargs),
                 name=tool_name,
                 side_effect=side_effect,
+                footprint=footprint,
+                replay_source=replay_source,
+                observables=observables,
                 codec=codec,
                 category="tool",
             )
@@ -126,6 +143,9 @@ def wrap_tool(
                 lambda: fn(*args, **call_kwargs),
                 name=tool_name,
                 side_effect=side_effect,
+                footprint=footprint,
+                replay_source=replay_source,
+                observables=observables,
                 codec=codec,
                 category="tool",
             )
@@ -134,5 +154,6 @@ def wrap_tool(
 
     wrapper.tool_name = tool_name  # type: ignore[attr-defined]
     wrapper.side_effect = side_effect  # type: ignore[attr-defined]
-    wrapper.__wrapped__ = fn
+    wrapper.footprint = footprint  # type: ignore[attr-defined]
+    setattr(wrapper, "__wrapped__", fn)
     return wrapper

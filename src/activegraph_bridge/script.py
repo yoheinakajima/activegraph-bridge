@@ -318,8 +318,11 @@ class Cursor:
                     "sources (activegraph_bridge.det)."
                 ),
             )
-        # Next entry is an invocation boundary: the agent is making a call
-        # the recording says shouldn't exist inside this invocation.
+        # ``peek`` skips checkpoints, so the only remaining entry type is
+        # an invocation boundary. The agent is making an extra call that
+        # the recording says should not exist inside this invocation.
+        if not isinstance(entry, InvocationEntry):
+            raise AssertionError(f"unexpected script entry: {type(entry).__name__}")
         raise ReplayDivergence(
             f"re-execution requested {name or kind!r} but the recording expected "
             f"the invocation boundary ({entry.boundary}) here",

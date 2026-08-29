@@ -36,8 +36,9 @@ through to the underlying agent, so the wrapper stays drop-in.
 from __future__ import annotations
 
 import inspect
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, cast
 
 from activegraph.core.clock import Clock
 
@@ -74,10 +75,12 @@ def build_spec(
     is_factory = (
         inspect.isfunction(agent_or_factory) or inspect.ismethod(agent_or_factory)
     ) and _looks_like_factory(agent_or_factory)
-    factory = agent_or_factory if is_factory else None
+    factory = (
+        cast(Callable[[], Any], agent_or_factory) if is_factory else None
+    )
     target = None if is_factory else agent_or_factory
 
-    probe = factory() if is_factory else target
+    probe = factory() if factory is not None else target
     resolved_adapter = resolve_adapter(adapter, probe)
     if not resolved_adapter.supports(probe):
         raise BridgeConfigurationError(
@@ -109,7 +112,7 @@ def build_spec(
         )
 
     return WrapSpec(
-        target=probe if not is_factory else None,
+        target=probe if factory is None else None,
         factory=factory,
         method=method,
         adapter=resolved_adapter,
@@ -296,8 +299,24 @@ class WrappedAgent:
     async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
         return await self._invoke_async("ainvoke", args, kwargs)
 
-    async def astream(self, *args: Any, **kwargs: Any) -> Any:
-        return await self._invoke_async("astream", args, kwargs)
+    def astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        """Return a standard async iterator while recording every chunk."""
+
+        async def generator() -> AsyncIterator[Any]:
+            stream = await self._invoke_async("astream", args, kwargs)
+            if isinstance(stream, AsyncIterator):
+                async for chunk in stream:
+                    yield chunk
+                return
+            if isinstance(stream, Iterator):
+                for chunk in stream:
+                    yield chunk
+                return
+            raise TypeError(
+                f"{type(stream).__name__} returned from astream() is not iterable"
+            )
+
+        return generator()
 
     # -- internals ----------------------------------------------------------------
 
@@ -357,10 +376,9 @@ class WrappedAgent:
             )
         recording = Recording.open(self._spec)
         self._last_run = Run(self._spec.store, recording.run_id, spec=self._spec)
-        status = "completed"
         try:
             with recording.session:
-                return await arecord_invoke(
+                output = await arecord_invoke(
                     recording.session,
                     self._spec,
                     recording.agent,
@@ -369,10 +387,14 @@ class WrappedAgent:
                     kwargs=kwargs,
                 )
         except BaseException:
-            status = "failed"
+            recording.finalize("failed")
             raise
-        finally:
-            recording.finalize(status)
+        if isinstance(output, AsyncIterator):
+            return _astreaming_run(recording, output)
+        if isinstance(output, Iterator):
+            return _streaming_run(recording, output)
+        recording.finalize("completed")
+        return output
 
 
 def _streaming_run(recording: Recording, inner: Iterator[Any]) -> Iterator[Any]:
@@ -388,6 +410,33 @@ def _streaming_run(recording: Recording, inner: Iterator[Any]) -> Iterator[Any]:
                     try:
                         chunk = next(inner)
                     except StopIteration:
+                        return
+                finally:
+                    _ACTIVE.reset(token)
+                yield chunk
+        except BaseException:
+            status = "failed"
+            raise
+        finally:
+            recording.finalize(status)
+
+    return generator()
+
+
+def _astreaming_run(
+    recording: Recording, inner: AsyncIterator[Any]
+) -> AsyncIterator[Any]:
+    """Keep a standalone async stream inside its membrane until exhaustion."""
+
+    async def generator() -> AsyncIterator[Any]:
+        status = "completed"
+        try:
+            while True:
+                token = _ACTIVE.set(recording.session)
+                try:
+                    try:
+                        chunk = await inner.__anext__()
+                    except StopAsyncIteration:
                         return
                 finally:
                     _ACTIVE.reset(token)

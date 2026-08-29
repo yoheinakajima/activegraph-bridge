@@ -1,0 +1,24 @@
+{
+  "child_output": {
+    "decision": "reject:vendor-public-1"
+  },
+  "child_run_id": "01M15GKCVKCMVBYFRCHEK9Y3CC",
+  "claim_scope": "Offline conformance evidence for an actual bridge fork after a committed recorded oracle effect; no real provider was called.",
+  "environment_verifier": "hmac-sha256:activegraph-bridge-conformance:fixture-v1",
+  "external_continuation": "verified",
+  "files": {
+    "child.jsonl": "747305a6774a3a505820a4b6a2ccbaf3556fb40d76dbef4d83873b9a483faaa6",
+    "environment-attestation.json": "43a0e7bb6dec6ba9bca578f87b169ecb02224dcf8e82702ea0860a6678ccc584",
+    "parent.jsonl": "884e8ae3429604b2d7a24dd7fff56c05f8d471427256faeadda18047d5c7c176",
+    "receipt.json": "da5503a80b9276f13f0fe37ce4cbf61a3ddb2416a7ec64c664084ca1f7883164"
+  },
+  "fork_inherited_oracle_calls": 0,
+  "prefix_hash": "3de3251368f20c4da2d234ac101e8a31b7b3142ede845157d9dcf39d69ccd8e4",
+  "receipt_hash": "5d36df7dc177a9801fa8ff6a4b070612fd0b16e4c45207825498fda03af3d3f0",
+  "schema_version": "activegraph-bridge/post-oracle-fixture-v1",
+  "source_oracle_calls": 1,
+  "source_output": {
+    "decision": "approve:vendor-public-1"
+  },
+  "source_run_id": "01M15GKCV4D5Z7WC9K173KH3B9"
+}

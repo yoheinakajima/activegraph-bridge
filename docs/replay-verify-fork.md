@@ -47,6 +47,15 @@ result.effects_served      # calls answered from the record
 result.divergence          # the ReplayDivergence, when not ok
 ```
 
+For a recording containing `ainvoke` or `astream`, synchronous code may
+still call `run.verify()`; it drives the async execution in a private
+event loop. Code already running in an event loop uses the native async
+form instead:
+
+```python
+result = await run.averify()
+```
+
 Success appends a `bridge.verification` event, so `run.report` shows
 `boundary-verified` from then on — in any process that loads the run.
 
@@ -67,6 +76,10 @@ alternative = fork.execute()
 child = fork.run                    # a full Run: report, replay, verify, fork again
 diff = run.diff(fork)
 ```
+
+Async agent surfaces use `alternative = await fork.aexecute()`. As with
+verification, `fork.execute()` remains a convenience for synchronous
+callers that are not already inside an event loop.
 
 What `fork()` does at creation time:
 
@@ -99,6 +112,62 @@ Multi-turn runs fork naturally: `before=run.events.invocation(2)`
 serves turn 1 from the record (reconstructing the agent's conversation
 state) and re-runs turns 2+ live with their recorded inputs — the same
 conversation script against the divergent state.
+
+### Fork receipts
+
+`fork.execute()` always emits a `bridge.fork_receipt` after a successful
+execution. The receipt records:
+
+- the exact copied-prefix and pre-receipt child-log hashes;
+- source and target runtime fingerprints;
+- every inherited effect descriptor and terminal outcome;
+- the request event ids served from the record;
+- the process-produced prefix-call counter and separately listed tail
+  executions;
+- the signed, fork-bound caller assertion about the target environment and
+  verifier identity, when supplied.
+
+Without a signed assertion, a fork can record zero observed re-execution but
+remains a Conditional external continuation because the runtime lacks even a
+trusted caller claim that the target environment represents the retained
+prefix. A configured verifier authenticates the assertion's origin and fork
+binding; it does not inspect the environment or establish the claim's truth.
+Deployments must ensure the configured issuer validates an environment before
+issuing the assertion:
+
+```python
+from activegraph_bridge import HmacEnvironmentAttestor, verify_fork_receipt
+
+attestor = HmacEnvironmentAttestor(secret, issuer="runtime", key_id="prod-v1")
+environment = attestor.issue(
+    environment_id="fork-worker-7",
+    snapshot_id="snapshot-42",
+    claims=fork.environment_claims(),
+)
+fork.execute(
+    target_environment=environment,
+    environment_verifier=attestor,
+)
+
+receipt = fork.receipt
+check = verify_fork_receipt(
+    receipt,
+    parent_events=run.raw_events(),
+    child_events=fork.run.raw_events(),
+    environment_verifier=attestor,
+)
+assert check.ok
+assert receipt.external_continuation == "verified"
+```
+
+The HMAC key is never written to the log. Its `key_id` and verifier identity
+are. Authentication is relative to the caller's configured trust root; it is
+not provider attestation. The receipt schema is
+[`schemas/fork-receipt-v1.schema.json`](../schemas/fork-receipt-v1.schema.json).
+The checked-in
+[`evidence/post-oracle-fork-v1`](../evidence/post-oracle-fork-v1/) fixture
+exercises this path offline and verifies that a committed recorded oracle was
+served without another call.
 
 ### Selectors
 

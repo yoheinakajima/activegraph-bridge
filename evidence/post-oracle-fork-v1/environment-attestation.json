@@ -1,0 +1,18 @@
+{
+  "algorithm": "hmac-sha256",
+  "claims": {
+    "child_run_id": "01M15GKCVKCMVBYFRCHEK9Y3CC",
+    "forked_before_event_id": "evt_013",
+    "parent_run_id": "01M15GKCV4D5Z7WC9K173KH3B9",
+    "prefix_hash": "3de3251368f20c4da2d234ac101e8a31b7b3142ede845157d9dcf39d69ccd8e4",
+    "target_fingerprint_hash": "bfe7417e604851448e984867a87f196ec195690cf17c0613119c8a3888573373"
+  },
+  "environment_id": "fixture-clean-room",
+  "expires_at": null,
+  "issued_at": "2026-08-28T00:00:00Z",
+  "issuer": "activegraph-bridge-conformance",
+  "key_id": "fixture-v1",
+  "schema_version": "activegraph-bridge/environment-attestation-v1",
+  "signature": "xdZfl9xJtCN84SOQeghrZm56bSxhpp9MUmlnMwQxPa4",
+  "snapshot_id": "fixture-snapshot-v1"
+}

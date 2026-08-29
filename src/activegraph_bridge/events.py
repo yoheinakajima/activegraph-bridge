@@ -42,6 +42,7 @@ __all__ = [
     "HAZARD_DETECTED",
     "VERIFICATION_RECORDED",
     "FORK_CONFIGURED",
+    "FORK_RECEIPT",
     "BRIDGE_EVENT_TYPES",
     "META_EVENT_TYPES",
     "effect_pairs",
@@ -59,6 +60,7 @@ CHECKPOINT_RECORDED = "checkpoint.recorded"
 HAZARD_DETECTED = "hazard.detected"
 VERIFICATION_RECORDED = "bridge.verification"
 FORK_CONFIGURED = "bridge.fork_configured"
+FORK_RECEIPT = "bridge.fork_receipt"
 
 BRIDGE_EVENT_TYPES = frozenset(
     {
@@ -74,13 +76,21 @@ BRIDGE_EVENT_TYPES = frozenset(
         HAZARD_DETECTED,
         VERIFICATION_RECORDED,
         FORK_CONFIGURED,
+        FORK_RECEIPT,
     }
 )
 
 # Events that describe the run *about itself* rather than what the agent
 # did. Excluded from execution comparisons (diff, verify scripts).
 META_EVENT_TYPES = frozenset(
-    {RUN_STARTED, RUN_COMPLETED, VERIFICATION_RECORDED, FORK_CONFIGURED, HAZARD_DETECTED}
+    {
+        RUN_STARTED,
+        RUN_COMPLETED,
+        VERIFICATION_RECORDED,
+        FORK_CONFIGURED,
+        FORK_RECEIPT,
+        HAZARD_DETECTED,
+    }
 )
 
 
