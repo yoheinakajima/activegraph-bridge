@@ -52,6 +52,9 @@ packages = ["src/activegraph_bridge"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.mypy]
 python_version = "3.11"
 files = ["src/activegraph_bridge"]
