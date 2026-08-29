@@ -581,7 +581,8 @@ class Run:
             )
         ids = IDGen()
         ids.reseed_from_events(child_events)
-        self._store.open_run(child_run_id).append(
+        self._store.append_event(
+            child_run_id,
             Event(
                 id=ids.event(),
                 type=ev.FORK_CONFIGURED,
@@ -604,7 +605,7 @@ class Run:
                 },
                 actor="bridge",
                 timestamp=Clock().now(),
-            )
+            ),
         )
         return Fork(
             parent=self,
@@ -743,14 +744,15 @@ class Run:
         events = self.raw_events()
         ids = IDGen()
         ids.reseed_from_events(events)
-        self._store.open_run(self.run_id).append(
+        self._store.append_event(
+            self.run_id,
             Event(
                 id=ids.event(),
                 type=type_,
                 payload=payload,
                 actor="bridge",
                 timestamp=Clock().now(),
-            )
+            ),
         )
 
     def _persist_verification(

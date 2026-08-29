@@ -68,6 +68,16 @@ class BridgeStore:
             if close:
                 close()
 
+    def append_event(self, run_id: str, event: Event) -> None:
+        """Append through a short-lived handle and close it deterministically."""
+        store = self.open_run(run_id)
+        try:
+            store.append(event)
+        finally:
+            close = getattr(store, "close", None)
+            if close:
+                close()
+
     def fork_run(
         self, *, parent_run_id: str, new_run_id: str, at_event_id: str, label: str | None
     ) -> int:

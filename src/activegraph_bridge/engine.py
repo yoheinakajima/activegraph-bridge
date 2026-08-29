@@ -144,41 +144,51 @@ class Recording:
         event_store = spec.store.create_run(
             run_id, label=label or spec.label, goal=goal
         )
-        graph = Graph(ids=IDGen(), clock=spec.clock_factory(), run_id=run_id)
-        graph.attach_store(event_store)
-        projector = spec.projector_factory() if spec.projector_factory else None
-        session = ExecutionSession(
-            mode=SessionMode.RECORD,
-            graph=graph,
-            policy=spec.policy,
-            codec=spec.codec,
-            projector=projector,
-        )
-        session._emit(
-            ev.RUN_STARTED,
-            {
-                "mode": "record",
-                "label": label or spec.label,
-                "metadata": dict(spec.metadata) | dict(metadata or {}),
-                "adapter": getattr(spec.adapter, "name", "?"),
-                "adapter_capabilities": spec.adapter.capabilities.to_dict(),
-                "target": spec.describe_target(),
-                "method": spec.method,
-                "reconstruction": spec.reconstruction,
-                "fingerprint": spec.fingerprint(),
-                "match": spec.match,
-            },
-        )
-        return cls(
-            spec=spec,
-            session=session,
-            graph=graph,
-            run_id=run_id,
-            agent=spec.build_agent(),
-        )
+        try:
+            graph = Graph(ids=IDGen(), clock=spec.clock_factory(), run_id=run_id)
+            graph.attach_store(event_store)
+            projector = spec.projector_factory() if spec.projector_factory else None
+            session = ExecutionSession(
+                mode=SessionMode.RECORD,
+                graph=graph,
+                policy=spec.policy,
+                codec=spec.codec,
+                projector=projector,
+            )
+            session._emit(
+                ev.RUN_STARTED,
+                {
+                    "mode": "record",
+                    "label": label or spec.label,
+                    "metadata": dict(spec.metadata) | dict(metadata or {}),
+                    "adapter": getattr(spec.adapter, "name", "?"),
+                    "adapter_capabilities": spec.adapter.capabilities.to_dict(),
+                    "target": spec.describe_target(),
+                    "method": spec.method,
+                    "reconstruction": spec.reconstruction,
+                    "fingerprint": spec.fingerprint(),
+                    "match": spec.match,
+                },
+            )
+            return cls(
+                spec=spec,
+                session=session,
+                graph=graph,
+                run_id=run_id,
+                agent=spec.build_agent(),
+            )
+        except BaseException:
+            event_store.close()
+            raise
 
     def finalize(self, status: str) -> None:
-        self.session.finalize(status=status)
+        try:
+            self.session.finalize(status=status)
+        finally:
+            store = self.graph.store
+            close = getattr(store, "close", None)
+            if close:
+                close()
 
 
 def _invocation_input(args: tuple, kwargs: dict) -> dict[str, Any]:
@@ -605,55 +615,58 @@ def fork_execute(
     graph = Graph(ids=IDGen(), clock=spec.clock_factory(), run_id=child_run_id)
     replay_into(graph, child_events)
     graph.ids.reseed_from_events(child_events)
-    graph.attach_store(spec.store.open_run(child_run_id))
-
-    policy = spec.policy
-    if side_effects == "live":
-        # Explicit authorization: the tail writes like a live recording.
-        from dataclasses import replace
-
-        policy = replace(policy, on_fork_write=policy.on_write)
-
-    projector = spec.projector_factory() if spec.projector_factory else None
-    session = ExecutionSession(
-        mode=SessionMode.PREFIX,
-        graph=graph,
-        cursor=cursor,
-        policy=policy,
-        codec=spec.codec,
-        projector=projector,
-        override=override,
-    )
-    agent = _require_reconstructable(spec, agent, "fork.execute()")
-
-    # The drive plan comes from the parent's full recording: the fork
-    # replays each recorded invocation (prefix ones validate + serve;
-    # post-fork-point ones run live in the tail with their recorded
-    # inputs — the counterfactual keeps the conversation script).
-    full_script = EffectScript.from_events(parent_events)
-    outputs: list[Any] = []
-    status = "completed"
+    event_store = spec.store.open_run(child_run_id)
+    graph.attach_store(event_store)
     try:
-        with session:
-            for start, _end in full_script.top_level_invocations():
-                input_override = None
-                if (
-                    override is not None
-                    and override.has_input
-                    and override.target_event_id == start.start_event_id
-                ):
-                    input_override = override.input
-                outputs.append(
-                    _drive_invocation(
-                        session, spec, agent, start, input_override=input_override
+        policy = spec.policy
+        if side_effects == "live":
+            # Explicit authorization: the tail writes like a live recording.
+            from dataclasses import replace
+
+            policy = replace(policy, on_fork_write=policy.on_write)
+
+        projector = spec.projector_factory() if spec.projector_factory else None
+        session = ExecutionSession(
+            mode=SessionMode.PREFIX,
+            graph=graph,
+            cursor=cursor,
+            policy=policy,
+            codec=spec.codec,
+            projector=projector,
+            override=override,
+        )
+        agent = _require_reconstructable(spec, agent, "fork.execute()")
+
+        # The drive plan comes from the parent's full recording: the fork
+        # replays each recorded invocation (prefix ones validate + serve;
+        # post-fork-point ones run live in the tail with their recorded
+        # inputs — the counterfactual keeps the conversation script).
+        full_script = EffectScript.from_events(parent_events)
+        outputs: list[Any] = []
+        status = "completed"
+        try:
+            with session:
+                for start, _end in full_script.top_level_invocations():
+                    input_override = None
+                    if (
+                        override is not None
+                        and override.has_input
+                        and override.target_event_id == start.start_event_id
+                    ):
+                        input_override = override.input
+                    outputs.append(
+                        _drive_invocation(
+                            session, spec, agent, start, input_override=input_override
+                        )
                     )
-                )
-    except BaseException:
-        status = "failed"
-        session.finalize(status=status)
-        raise
-    session.finalize(status=status)
-    return (outputs[-1] if outputs else None), session
+        except BaseException:
+            status = "failed"
+            raise
+        finally:
+            session.finalize(status=status)
+        return (outputs[-1] if outputs else None), session
+    finally:
+        event_store.close()
 
 
 async def afork_execute(
@@ -674,47 +687,50 @@ async def afork_execute(
     graph = Graph(ids=IDGen(), clock=spec.clock_factory(), run_id=child_run_id)
     replay_into(graph, child_events)
     graph.ids.reseed_from_events(child_events)
-    graph.attach_store(spec.store.open_run(child_run_id))
-
-    policy = spec.policy
-    if side_effects == "live":
-        from dataclasses import replace
-
-        policy = replace(policy, on_fork_write=policy.on_write)
-
-    projector = spec.projector_factory() if spec.projector_factory else None
-    session = ExecutionSession(
-        mode=SessionMode.PREFIX,
-        graph=graph,
-        cursor=cursor,
-        policy=policy,
-        codec=spec.codec,
-        projector=projector,
-        override=override,
-    )
-    agent = _require_reconstructable(spec, agent, "fork.execute()")
-
-    full_script = EffectScript.from_events(parent_events)
-    outputs: list[Any] = []
-    status = "completed"
+    event_store = spec.store.open_run(child_run_id)
+    graph.attach_store(event_store)
     try:
-        with session:
-            for start, _end in full_script.top_level_invocations():
-                input_override = None
-                if (
-                    override is not None
-                    and override.has_input
-                    and override.target_event_id == start.start_event_id
-                ):
-                    input_override = override.input
-                outputs.append(
-                    await _adrive_invocation(
-                        session, spec, agent, start, input_override=input_override
+        policy = spec.policy
+        if side_effects == "live":
+            from dataclasses import replace
+
+            policy = replace(policy, on_fork_write=policy.on_write)
+
+        projector = spec.projector_factory() if spec.projector_factory else None
+        session = ExecutionSession(
+            mode=SessionMode.PREFIX,
+            graph=graph,
+            cursor=cursor,
+            policy=policy,
+            codec=spec.codec,
+            projector=projector,
+            override=override,
+        )
+        agent = _require_reconstructable(spec, agent, "fork.execute()")
+
+        full_script = EffectScript.from_events(parent_events)
+        outputs: list[Any] = []
+        status = "completed"
+        try:
+            with session:
+                for start, _end in full_script.top_level_invocations():
+                    input_override = None
+                    if (
+                        override is not None
+                        and override.has_input
+                        and override.target_event_id == start.start_event_id
+                    ):
+                        input_override = override.input
+                    outputs.append(
+                        await _adrive_invocation(
+                            session, spec, agent, start, input_override=input_override
+                        )
                     )
-                )
-    except BaseException:
-        status = "failed"
-        session.finalize(status=status)
-        raise
-    session.finalize(status=status)
-    return (outputs[-1] if outputs else None), session
+        except BaseException:
+            status = "failed"
+            raise
+        finally:
+            session.finalize(status=status)
+        return (outputs[-1] if outputs else None), session
+    finally:
+        event_store.close()
