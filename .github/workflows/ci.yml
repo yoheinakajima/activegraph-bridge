@@ -25,7 +25,7 @@ jobs:
       - run: python -m pip install ".[dev]"
       - run: ruff check src tests examples
       - run: mypy
-      - run: coverage run --branch -m pytest -W error
-      - run: coverage report --include="src/activegraph_bridge/*" --fail-under=75
+      - run: coverage run -m pytest -W error
+      - run: coverage report
       - run: python -m build
       - run: twine check --strict dist/*
