@@ -3,13 +3,15 @@
 This language-neutral bundle records an actual `activegraph-bridge` fork after
 a committed, recorded oracle effect. The parent executes one deterministic
 offline fixture oracle call. Verification and the child fork serve that result
-from the log; the fork performs zero inherited external calls. A changed tool
-result creates the divergent child tail.
+from the log; the generator observes no second fixture-oracle call in the child.
+A changed tool result creates the divergent child tail.
 
 `receipt.json` binds the source prefix, child log, inherited effect identity,
-source and target fingerprints, and signed target-environment claims. The HMAC
-key is deliberately published because this is a conformance trust root, not a
-production credential or claim about a real provider environment.
+source and target fingerprints, and a signed caller assertion about the target
+environment. The verifier checks signature and fork binding, not the truth of
+the assertion's contents. The HMAC key is deliberately published because this
+is a conformance trust root, not a production credential or claim about a real
+provider environment.
 
 Run from the repository root:
 

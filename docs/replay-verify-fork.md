@@ -122,13 +122,18 @@ execution. The receipt records:
 - source and target runtime fingerprints;
 - every inherited effect descriptor and terminal outcome;
 - the request event ids served from the record;
-- zero prefix external calls and the separately listed tail executions;
-- the target-environment attestation and verifier identity, when supplied.
+- the process-produced prefix-call counter and separately listed tail
+  executions;
+- the signed, fork-bound caller assertion about the target environment and
+  verifier identity, when supplied.
 
-An unattested fork can establish zero re-execution but remains a Conditional
-external continuation because the runtime has no evidence that the target
-environment represents the retained prefix. Discharge that premise with a
-configured verifier:
+Without a signed assertion, a fork can record zero observed re-execution but
+remains a Conditional external continuation because the runtime lacks even a
+trusted caller claim that the target environment represents the retained
+prefix. A configured verifier authenticates the assertion's origin and fork
+binding; it does not inspect the environment or establish the claim's truth.
+Deployments must ensure the configured issuer validates an environment before
+issuing the assertion:
 
 ```python
 from activegraph_bridge import HmacEnvironmentAttestor, verify_fork_receipt

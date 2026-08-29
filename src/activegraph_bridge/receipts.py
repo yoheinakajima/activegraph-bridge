@@ -1,4 +1,4 @@
-"""Authenticated environment evidence and hash-bound fork receipts.
+"""Signed environment assertions and hash-bound fork receipts.
 
 The bridge can already *enforce* that a fork prefix is served from the log.
 This module makes that enforcement portable evidence. A receipt binds the
@@ -108,7 +108,7 @@ class EnvironmentAttestation:
 
 @runtime_checkable
 class EnvironmentVerifier(Protocol):
-    """Configured trust root for a target-environment attestation."""
+    """Configured trust root for a target-environment assertion."""
 
     @property
     def verifier_id(self) -> str: ...
@@ -117,7 +117,7 @@ class EnvironmentVerifier(Protocol):
 
 
 class HmacEnvironmentAttestor:
-    """Issue and verify HMAC-SHA256 environment attestations."""
+    """Issue and verify HMAC-SHA256 environment assertions."""
 
     def __init__(self, secret: bytes, *, issuer: str, key_id: str) -> None:
         if not secret:

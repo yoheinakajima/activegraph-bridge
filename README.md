@@ -42,9 +42,13 @@ assert receipt.external_continuation == "verified"
 ```
 
 The receipt hash-binds the copied prefix and child log, names every inherited
-effect served from the record, records zero prefix external calls, and carries
-the verified target-environment attestation. Without an attestation the bridge
-still emits a receipt, but its continuation verdict remains `conditional`.
+effect served from the record, records the process-produced prefix-call counter,
+and carries a signature-checked, fork-bound caller assertion about the target
+environment. The bridge verifies the assertion's origin and binding, not the
+truth of its contents; deployments are responsible for ensuring the configured
+issuer validates an environment before issuing it. Without such an assertion
+the bridge still emits a receipt, but its continuation verdict remains
+`conditional`.
 
 Your agent keeps its own orchestration, prompts, loops, and framework
 control flow. The bridge mediates what the agent *does* — model calls,
@@ -296,7 +300,8 @@ Runnable examples (offline, no API keys) live in [`examples/`](examples/).
 
 ## Status
 
-v0.2 — the core semantics and portable receipt path, checked by an uncompromising test suite
+Unreleased v0.2 candidate — the core semantics and portable receipt path,
+checked by an uncompromising test suite
 (strict verification makes zero live calls; forks preserve verified
 prefixes; unrecorded I/O blocks the verified badge; writes cannot fire
 during replay or normal forks; inherited one-shot effects are served from the
@@ -307,7 +312,8 @@ fresh-process verification reproduces output and graph). Framework adapters
 
 The checked-in [post-oracle fixture](evidence/post-oracle-fork-v1/) is an
 offline, language-neutral witness: one committed recorded oracle interaction,
-one actual child fork, and zero inherited external calls.
+one actual child fork, and a generator-observed absence of any additional
+fixture-oracle call in the child.
 
 ## License
 
