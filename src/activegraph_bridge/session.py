@@ -48,7 +48,12 @@ from .codecs import (
     find_lossy,
 )
 from .errors import ReplayDivergence, UnrecordedEffectError
-from .policy import SideEffectPolicy
+from .policy import (
+    Footprint,
+    ReplaySource,
+    SideEffectPolicy,
+    derive_footprint,
+)
 from .report import Finding
 from .script import Cursor
 
@@ -97,6 +102,9 @@ class ForkOverride:
     kind: str
     name: str
     request_hash: str
+    footprint: Footprint = "idempotent"
+    replay_source: ReplaySource = "recorded"
+    observables: tuple[str, ...] = ()
     response: Any = None
     has_response: bool = False
     input: Any = None
@@ -143,6 +151,9 @@ class ExecutionSession:
         self.findings: list[Finding] = []
         self.effects_served = 0
         self.live_calls = 0
+        self.prefix_external_calls = 0
+        self.served_effect_request_ids: list[str] = []
+        self.executed_effect_request_ids: list[str] = []
         # One agent instance per wrapper per session: nested wrapped agents
         # are rebuilt fresh for every shadow/fork session, exactly like the
         # top-level agent. Keyed by id(wrapper).
@@ -388,6 +399,9 @@ class ExecutionSession:
         *,
         name: str = "",
         side_effect: str = "unknown",
+        footprint: Footprint | None = None,
+        replay_source: ReplaySource = "recorded",
+        observables: tuple[str, ...] = (),
         codec: EffectCodec | None = None,
         category: str | None = None,
     ) -> Any:
@@ -410,6 +424,7 @@ class ExecutionSession:
         encoded_request = codec.encode_request(request)
         request_hash = content_hash(encoded_request)
         category = category or _categorize(kind)
+        footprint = footprint or derive_footprint(side_effect)  # type: ignore[arg-type]
 
         if self.is_serving:
             served = self._serve(
@@ -426,6 +441,9 @@ class ExecutionSession:
             name=name,
             category=category,
             side_effect=side_effect,
+            footprint=footprint,
+            replay_source=replay_source,
+            observables=observables,
             request=request,
             encoded_request=encoded_request,
             request_hash=request_hash,
@@ -442,6 +460,9 @@ class ExecutionSession:
         *,
         name: str = "",
         side_effect: str = "unknown",
+        footprint: Footprint | None = None,
+        replay_source: ReplaySource = "recorded",
+        observables: tuple[str, ...] = (),
         codec: EffectCodec | None = None,
         category: str | None = None,
     ) -> Any:
@@ -450,6 +471,7 @@ class ExecutionSession:
         encoded_request = codec.encode_request(request)
         request_hash = content_hash(encoded_request)
         category = category or _categorize(kind)
+        footprint = footprint or derive_footprint(side_effect)  # type: ignore[arg-type]
 
         if self.is_serving:
             served = self._serve(
@@ -466,6 +488,9 @@ class ExecutionSession:
             name=name,
             category=category,
             side_effect=side_effect,
+            footprint=footprint,
+            replay_source=replay_source,
+            observables=observables,
             request=request,
             encoded_request=encoded_request,
             request_hash=request_hash,
@@ -522,6 +547,7 @@ class ExecutionSession:
                     )
                 return _FALL_THROUGH  # first live call of the tail
             self.effects_served += 1
+            self.served_effect_request_ids.append(entry.request_event_id)
             if entry.failed:
                 raise decode_exception(entry.error)
             return codec.decode_response(entry.response)
@@ -607,6 +633,9 @@ class ExecutionSession:
                 name=name,
                 category=_categorize(kind),
                 side_effect="read",
+                footprint=override.footprint,
+                replay_source=override.replay_source,
+                observables=override.observables,
                 encoded_request=encoded_request,
                 request_hash=request_hash,
                 codec_name=getattr(codec, "name", "auto"),
@@ -625,6 +654,7 @@ class ExecutionSession:
                 "latency_seconds": 0.0,
                 "ordinal": req_event.payload.get("ordinal"),
                 "lossy": find_lossy(encoded_response),
+                "lifecycle": "committed",
             },
             caused_by=req_event.id,
         )
@@ -639,6 +669,9 @@ class ExecutionSession:
         name: str,
         category: str,
         side_effect: str,
+        footprint: Footprint,
+        replay_source: ReplaySource,
+        observables: tuple[str, ...],
         encoded_request: Any,
         request_hash: str,
         codec_name: str,
@@ -649,6 +682,10 @@ class ExecutionSession:
             "name": name,
             "category": category,
             "side_effect": side_effect,
+            "footprint": footprint,
+            "replay_source": replay_source,
+            "observables": sorted(set(observables)),
+            "lifecycle": "requested",
             "request": encoded_request,
             "request_hash": request_hash,
             "ordinal": self._effect_ordinal,
@@ -667,6 +704,9 @@ class ExecutionSession:
         name: str,
         category: str,
         side_effect: str,
+        footprint: Footprint,
+        replay_source: ReplaySource,
+        observables: tuple[str, ...],
         request: Any,
         encoded_request: Any,
         request_hash: str,
@@ -675,7 +715,9 @@ class ExecutionSession:
         is_async: bool,
     ) -> Any:
         decision = self.policy.decide(
-            side_effect=side_effect, fork_tail=self.fork_tail  # type: ignore[arg-type]
+            side_effect=side_effect,  # type: ignore[arg-type]
+            footprint=footprint,
+            fork_tail=self.fork_tail,
         )
         mode_name = self.mode.value
         with self._lock:
@@ -684,6 +726,9 @@ class ExecutionSession:
                 name=name,
                 category=category,
                 side_effect=side_effect,
+                footprint=footprint,
+                replay_source=replay_source,
+                observables=observables,
                 encoded_request=encoded_request,
                 request_hash=request_hash,
                 codec_name=getattr(codec, "name", "auto"),
@@ -721,6 +766,7 @@ class ExecutionSession:
                         "latency_seconds": round(time.monotonic() - started, 6),
                         "ordinal": payload["ordinal"],
                         "lossy": lossy,
+                        "lifecycle": "committed",
                     },
                     caused_by=req_event.id,
                 )
@@ -741,6 +787,7 @@ class ExecutionSession:
                         "served_from": served_from,
                         "latency_seconds": round(time.monotonic() - started, 6),
                         "ordinal": payload["ordinal"],
+                        "lifecycle": "failed",
                     },
                     caused_by=req_event.id,
                 )
@@ -783,6 +830,9 @@ class ExecutionSession:
             return finish_ok(value, "simulated", started)
 
         # decision == "execute": live call, guarded as mediated I/O.
+        if self.mode is SessionMode.PREFIX:
+            self.prefix_external_calls += 1
+        self.executed_effect_request_ids.append(req_event.id)
         if is_async:
             return self._execute_async(execute, finish_ok, finish_err, served_from)
         started = time.monotonic()
@@ -943,6 +993,9 @@ def effect(
     *,
     name: str = "",
     side_effect: str = "unknown",
+    footprint: Footprint | None = None,
+    replay_source: ReplaySource = "recorded",
+    observables: tuple[str, ...] = (),
     codec: EffectCodec | None = None,
     category: str | None = None,
 ) -> Any:
@@ -969,6 +1022,9 @@ def effect(
         execute,
         name=name,
         side_effect=side_effect,
+        footprint=footprint,
+        replay_source=replay_source,
+        observables=observables,
         codec=codec,
         category=category,
     )
@@ -981,6 +1037,9 @@ async def aeffect(
     *,
     name: str = "",
     side_effect: str = "unknown",
+    footprint: Footprint | None = None,
+    replay_source: ReplaySource = "recorded",
+    observables: tuple[str, ...] = (),
     codec: EffectCodec | None = None,
     category: str | None = None,
 ) -> Any:
@@ -994,6 +1053,9 @@ async def aeffect(
         execute,
         name=name,
         side_effect=side_effect,
+        footprint=footprint,
+        replay_source=replay_source,
+        observables=observables,
         codec=codec,
         category=category,
     )

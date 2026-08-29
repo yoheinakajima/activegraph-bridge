@@ -39,6 +39,7 @@ from activegraph.runtime.diff import Diff, compute_diff
 from activegraph.store.base import RunRecord, replay_into
 
 from . import events as ev
+from ._canonical import content_hash
 from ._store import BridgeStore, resolve_store
 from .codecs import AutoCodec, EffectCodec
 from .engine import (
@@ -57,9 +58,24 @@ from .errors import (
     ReconstructionError,
 )
 from .report import ReplayabilityReport, compute_report
+from .receipts import (
+    EnvironmentAttestation,
+    EnvironmentVerifier,
+    ForkReceipt,
+    effect_evidence,
+    event_log_hash,
+)
 from .session import ForkOverride
 
-__all__ = ["Run", "Fork", "RunDiff", "Replay", "EventRef", "load_run", "list_runs"]
+__all__ = [
+    "Run",
+    "Fork",
+    "RunDiff",
+    "Replay",
+    "EventRef",
+    "load_run",
+    "list_runs",
+]
 
 _T = TypeVar("_T")
 
@@ -78,6 +94,13 @@ def _run_async_operation(
         why="Starting a nested event loop would be unsafe and is rejected by asyncio.",
         how_to_fix=f"Use `{async_api}` in async code.",
     )
+
+
+def _fingerprint_from_events(events: list[Event]) -> dict[str, Any]:
+    for event in events:
+        if event.type == ev.RUN_STARTED:
+            return dict(event.payload.get("fingerprint") or {})
+    return {}
 
 
 # --------------------------------------------------------------------------- #
@@ -102,6 +125,9 @@ class EventRef:
     ordinal: int | None = None
     quiescent: bool = True
     request_hash: str = ""
+    footprint: str = "unknown"
+    replay_source: str = "recorded"
+    observables: tuple[str, ...] = ()
 
     @property
     def forkable(self) -> bool:
@@ -151,6 +177,11 @@ class RunEvents:
                     ordinal=e.payload.get("ordinal"),
                     quiescent=bool(e.payload.get("quiescent", True)),
                     request_hash=str(e.payload.get("request_hash", "")),
+                    footprint=str(e.payload.get("footprint", "unknown")),
+                    replay_source=str(e.payload.get("replay_source", "recorded")),
+                    observables=tuple(
+                        sorted(str(item) for item in (e.payload.get("observables") or []))
+                    ),
                 )
             )
         return refs
@@ -193,6 +224,9 @@ class RunEvents:
             ordinal=ref.ordinal,
             quiescent=ref.quiescent,
             request_hash=ref.request_hash,
+            footprint=ref.footprint,
+            replay_source=ref.replay_source,
+            observables=ref.observables,
         )
 
     def effect(
@@ -523,6 +557,10 @@ class Run:
             )
         override = self._build_override(anchor, overrides or {})
         at_event = events[idx - 1].id
+        prefix_events = events[:idx]
+        prefix_hash = event_log_hash(prefix_events)
+        parent_log_hash_at_fork = event_log_hash(events)
+        source_fingerprint = _fingerprint_from_events(events)
 
         child_run_id = IDGen().run()
         self._store.fork_run(
@@ -534,6 +572,13 @@ class Run:
         # Stamp the child with its fork configuration — auditability of
         # *what was changed* is half the value of a counterfactual.
         child_events = self._store.load_events(child_run_id)
+        if event_log_hash(child_events[:idx]) != prefix_hash:
+            raise BridgeConfigurationError(
+                "the copied child prefix does not match the source prefix",
+                what_failed="ActiveGraph fork_run returned a different prefix hash.",
+                why="A fork receipt cannot be issued over a prefix that was not copied exactly.",
+                how_to_fix="Inspect the event store fork implementation before executing this branch.",
+            )
         ids = IDGen()
         ids.reseed_from_events(child_events)
         self._store.open_run(child_run_id).append(
@@ -553,6 +598,9 @@ class Run:
                     if override is not None
                     else None,
                     "side_effects": side_effects,
+                    "prefix_event_count": idx,
+                    "prefix_hash": prefix_hash,
+                    "parent_log_hash_at_fork": parent_log_hash_at_fork,
                 },
                 actor="bridge",
                 timestamp=Clock().now(),
@@ -565,6 +613,12 @@ class Run:
             override=override,
             side_effects=side_effects,
             label=label,
+            prefix_event_count=idx,
+            parent_event_count_at_fork=len(events),
+            prefix_hash=prefix_hash,
+            parent_log_hash_at_fork=parent_log_hash_at_fork,
+            copied_through_event_id=at_event,
+            source_fingerprint=source_fingerprint,
         )
 
     def diff(self, other: "Run | Fork") -> "RunDiff":
@@ -577,6 +631,15 @@ class Run:
     @property
     def report(self) -> ReplayabilityReport:
         return compute_report(self.raw_events())
+
+    @property
+    def fork_receipts(self) -> list[ForkReceipt]:
+        """Persisted fork receipts, oldest first."""
+        return [
+            ForkReceipt.from_dict(event.payload)
+            for event in self.raw_events()
+            if event.type == ev.FORK_RECEIPT
+        ]
 
     def fork_points(self) -> list[EventRef]:
         return self.events.fork_points()
@@ -648,6 +711,9 @@ class Run:
                 kind=anchor.kind,
                 name=anchor.name,
                 request_hash=anchor.request_hash,
+                footprint=anchor.footprint,  # type: ignore[arg-type]
+                replay_source=anchor.replay_source,  # type: ignore[arg-type]
+                observables=anchor.observables,
                 response=overrides[response_keys[0]],
                 has_response=True,
             )
@@ -725,6 +791,12 @@ class Fork:
         override: ForkOverride | None,
         side_effects: str,
         label: str | None,
+        prefix_event_count: int,
+        parent_event_count_at_fork: int,
+        prefix_hash: str,
+        parent_log_hash_at_fork: str,
+        copied_through_event_id: str,
+        source_fingerprint: dict[str, Any],
     ) -> None:
         self.parent = parent
         self.child_run_id = child_run_id
@@ -732,8 +804,15 @@ class Fork:
         self.override = override
         self.side_effects = side_effects
         self.label = label
+        self.prefix_event_count = prefix_event_count
+        self.parent_event_count_at_fork = parent_event_count_at_fork
+        self.prefix_hash = prefix_hash
+        self.parent_log_hash_at_fork = parent_log_hash_at_fork
+        self.copied_through_event_id = copied_through_event_id
+        self.source_fingerprint = source_fingerprint
         self.executed = False
         self.output: Any = None
+        self.receipt: ForkReceipt | None = None
 
     def __repr__(self) -> str:
         return f"Fork({self.child_run_id!r}, before={self.anchor.event_id!r})"
@@ -743,16 +822,59 @@ class Fork:
         """The child run handle (usable before and after execute())."""
         return Run(self.parent.store, self.child_run_id, spec=self.parent._spec)
 
-    def execute(self, agent: Any = None, *, match: str | None = None) -> Any:
+    def environment_claims(
+        self, target_fingerprint: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Claims an environment attestation must bind before execution."""
+        if target_fingerprint is None:
+            target_fingerprint = self.parent._require_spec(
+                "fork.environment_claims()"
+            ).fingerprint()
+        return {
+            "parent_run_id": self.parent.run_id,
+            "child_run_id": self.child_run_id,
+            "prefix_hash": self.prefix_hash,
+            "forked_before_event_id": self.anchor.event_id,
+            "target_fingerprint_hash": content_hash(target_fingerprint),
+        }
+
+    def execute(
+        self,
+        agent: Any = None,
+        *,
+        match: str | None = None,
+        target_environment: EnvironmentAttestation | None = None,
+        environment_verifier: EnvironmentVerifier | None = None,
+    ) -> Any:
         """Re-execute to the fork point on recorded effects, apply the
         override, and record the divergent tail. Returns the (last)
         invocation's output."""
         self._ensure_not_executed("Fork.execute()")
         spec = self.parent._require_spec("fork.execute()")
+        target_fingerprint, environment_verified, verifier_id = (
+            self._verify_environment(
+                spec,
+                target_environment=target_environment,
+                environment_verifier=environment_verifier,
+            )
+        )
         parent_events = self.parent.raw_events()
-        if requires_async_drive(parent_events):
-            output, _session = _run_async_operation(
-                lambda: afork_execute(
+        try:
+            if requires_async_drive(parent_events):
+                output, session = _run_async_operation(
+                    lambda: afork_execute(
+                        spec,
+                        child_run_id=self.child_run_id,
+                        parent_events=parent_events,
+                        override=self.override,
+                        side_effects=self.side_effects,
+                        agent=agent,
+                        match=match,
+                    ),
+                    async_api="await fork.aexecute()",
+                )
+            else:
+                output, session = fork_execute(
                     spec,
                     child_run_id=self.child_run_id,
                     parent_events=parent_events,
@@ -760,11 +882,43 @@ class Fork:
                     side_effects=self.side_effects,
                     agent=agent,
                     match=match,
-                ),
-                async_api="await fork.aexecute()",
+                )
+        except BaseException:
+            self.executed = True
+            raise
+        self.receipt = self._persist_receipt(
+            session,
+            parent_events=parent_events,
+            target_fingerprint=target_fingerprint,
+            target_environment=target_environment,
+            environment_verified=environment_verified,
+            verifier_id=verifier_id,
+        )
+        self.executed = True
+        self.output = output
+        return output
+
+    async def aexecute(
+        self,
+        agent: Any = None,
+        *,
+        match: str | None = None,
+        target_environment: EnvironmentAttestation | None = None,
+        environment_verifier: EnvironmentVerifier | None = None,
+    ) -> Any:
+        """Awaitable fork execution for async code and agent surfaces."""
+        self._ensure_not_executed("Fork.aexecute()")
+        spec = self.parent._require_spec("fork.aexecute()")
+        target_fingerprint, environment_verified, verifier_id = (
+            self._verify_environment(
+                spec,
+                target_environment=target_environment,
+                environment_verifier=environment_verifier,
             )
-        else:
-            output, _session = fork_execute(
+        )
+        parent_events = self.parent.raw_events()
+        try:
+            output, session = await afork_execute(
                 spec,
                 child_run_id=self.child_run_id,
                 parent_events=parent_events,
@@ -773,26 +927,112 @@ class Fork:
                 agent=agent,
                 match=match,
             )
-        self.executed = True
-        self.output = output
-        return output
-
-    async def aexecute(self, agent: Any = None, *, match: str | None = None) -> Any:
-        """Awaitable fork execution for async code and agent surfaces."""
-        self._ensure_not_executed("Fork.aexecute()")
-        spec = self.parent._require_spec("fork.aexecute()")
-        output, _session = await afork_execute(
-            spec,
-            child_run_id=self.child_run_id,
-            parent_events=self.parent.raw_events(),
-            override=self.override,
-            side_effects=self.side_effects,
-            agent=agent,
-            match=match,
+        except BaseException:
+            self.executed = True
+            raise
+        self.receipt = self._persist_receipt(
+            session,
+            parent_events=parent_events,
+            target_fingerprint=target_fingerprint,
+            target_environment=target_environment,
+            environment_verified=environment_verified,
+            verifier_id=verifier_id,
         )
         self.executed = True
         self.output = output
         return output
+
+    def _verify_environment(
+        self,
+        spec: WrapSpec,
+        *,
+        target_environment: EnvironmentAttestation | None,
+        environment_verifier: EnvironmentVerifier | None,
+    ) -> tuple[dict[str, Any], bool, str | None]:
+        target_fingerprint = spec.fingerprint()
+        if target_environment is None:
+            if environment_verifier is not None:
+                raise BridgeConfigurationError(
+                    "an environment verifier was supplied without an attestation"
+                )
+            return target_fingerprint, False, None
+        if environment_verifier is None:
+            raise BridgeConfigurationError(
+                "target_environment requires an environment_verifier"
+            )
+        if not environment_verifier.verify(target_environment):
+            raise BridgeConfigurationError(
+                "target-environment attestation signature is invalid"
+            )
+        required = self.environment_claims(target_fingerprint)
+        missing = {
+            key: value
+            for key, value in required.items()
+            if target_environment.claims.get(key) != value
+        }
+        if missing:
+            raise BridgeConfigurationError(
+                "target-environment attestation does not bind this fork",
+                what_failed=f"Attested claims differ for {sorted(missing)}.",
+                why="A reusable or stale environment receipt cannot discharge this fork's premise.",
+                how_to_fix="Issue a fresh attestation from fork.environment_claims().",
+            )
+        return target_fingerprint, True, environment_verifier.verifier_id
+
+    def _persist_receipt(
+        self,
+        session: Any,
+        *,
+        parent_events: list[Event],
+        target_fingerprint: dict[str, Any],
+        target_environment: EnvironmentAttestation | None,
+        environment_verified: bool,
+        verifier_id: str | None,
+    ) -> ForkReceipt:
+        prefix = parent_events[: self.prefix_event_count]
+        inherited = effect_evidence(prefix)
+        inherited_ids = [item["request_event_id"] for item in inherited]
+        served_ids = list(session.served_effect_request_ids)
+        prefix_external_calls = int(session.prefix_external_calls)
+        zero_reexecution = (
+            prefix_external_calls == 0
+            and sorted(served_ids) == sorted(inherited_ids)
+        )
+        child_before_receipt = self.run.raw_events()
+        receipt = ForkReceipt(
+            parent_run_id=self.parent.run_id,
+            child_run_id=self.child_run_id,
+            forked_before_event_id=self.anchor.event_id,
+            copied_through_event_id=self.copied_through_event_id,
+            parent_event_count_at_fork=self.parent_event_count_at_fork,
+            prefix_event_count=self.prefix_event_count,
+            parent_log_hash_at_fork=self.parent_log_hash_at_fork,
+            prefix_hash=self.prefix_hash,
+            child_log_hash_before_receipt=event_log_hash(child_before_receipt),
+            source_fingerprint=self.source_fingerprint,
+            target_fingerprint=target_fingerprint,
+            target_environment=(
+                target_environment.to_dict() if target_environment is not None else None
+            ),
+            environment_verified=environment_verified,
+            environment_verifier=verifier_id,
+            inherited_effects=inherited,
+            served_effect_request_ids=served_ids,
+            prefix_external_calls=prefix_external_calls,
+            tail_executed_effect_request_ids=list(
+                session.executed_effect_request_ids
+            ),
+            zero_reexecution_verified=zero_reexecution,
+            external_continuation=(
+                "verified"
+                if zero_reexecution and environment_verified
+                else "conditional"
+            ),
+            status="completed",
+        )
+        receipt = ForkReceipt.from_dict(receipt.to_dict())
+        self.run._append_meta(ev.FORK_RECEIPT, receipt.to_dict())
+        return receipt
 
     def _ensure_not_executed(self, operation: str) -> None:
         if not self.executed:

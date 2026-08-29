@@ -41,7 +41,7 @@ import inspect
 from typing import Any
 
 from .codecs import EffectCodec
-from .policy import SideEffect
+from .policy import Footprint, ReplaySource, SideEffect
 from .session import aeffect, effect
 
 __all__ = ["wrap_client", "openai", "anthropic"]
@@ -84,6 +84,9 @@ def _wrap_method(fn: Any, dotted: str, config: dict) -> Any:
     common = dict(
         name=name,
         side_effect=config["side_effect"],
+        footprint=config["footprint"],
+        replay_source=config["replay_source"],
+        observables=config["observables"],
         codec=config["codec"],
         category=config["category"],
     )
@@ -110,6 +113,9 @@ def wrap_client(
     kind_prefix: str = "",
     category: str = "model",
     side_effect: SideEffect = "read",
+    footprint: Footprint | None = None,
+    replay_source: ReplaySource = "recorded",
+    observables: tuple[str, ...] = (),
     codec: EffectCodec | None = None,
     name: str | None = None,
 ) -> Any:
@@ -128,6 +134,9 @@ def wrap_client(
             "kind_prefix": kind_prefix,
             "category": category,
             "side_effect": side_effect,
+            "footprint": footprint,
+            "replay_source": replay_source,
+            "observables": observables,
             "codec": codec,
             "name": name,
         },
@@ -146,6 +155,9 @@ def openai(client: Any) -> Any:
         kind_prefix="openai",
         category="model",
         side_effect="read",
+        footprint="one_shot",
+        replay_source="recorded",
+        observables=("provider.cost", "provider.oracle"),
     )
 
 
@@ -157,4 +169,7 @@ def anthropic(client: Any) -> Any:
         kind_prefix="anthropic",
         category="model",
         side_effect="read",
+        footprint="one_shot",
+        replay_source="recorded",
+        observables=("provider.cost", "provider.oracle"),
     )

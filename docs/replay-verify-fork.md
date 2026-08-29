@@ -113,6 +113,57 @@ serves turn 1 from the record (reconstructing the agent's conversation
 state) and re-runs turns 2+ live with their recorded inputs — the same
 conversation script against the divergent state.
 
+### Fork receipts
+
+`fork.execute()` always emits a `bridge.fork_receipt` after a successful
+execution. The receipt records:
+
+- the exact copied-prefix and pre-receipt child-log hashes;
+- source and target runtime fingerprints;
+- every inherited effect descriptor and terminal outcome;
+- the request event ids served from the record;
+- zero prefix external calls and the separately listed tail executions;
+- the target-environment attestation and verifier identity, when supplied.
+
+An unattested fork can establish zero re-execution but remains a Conditional
+external continuation because the runtime has no evidence that the target
+environment represents the retained prefix. Discharge that premise with a
+configured verifier:
+
+```python
+from activegraph_bridge import HmacEnvironmentAttestor, verify_fork_receipt
+
+attestor = HmacEnvironmentAttestor(secret, issuer="runtime", key_id="prod-v1")
+environment = attestor.issue(
+    environment_id="fork-worker-7",
+    snapshot_id="snapshot-42",
+    claims=fork.environment_claims(),
+)
+fork.execute(
+    target_environment=environment,
+    environment_verifier=attestor,
+)
+
+receipt = fork.receipt
+check = verify_fork_receipt(
+    receipt,
+    parent_events=run.raw_events(),
+    child_events=fork.run.raw_events(),
+    environment_verifier=attestor,
+)
+assert check.ok
+assert receipt.external_continuation == "verified"
+```
+
+The HMAC key is never written to the log. Its `key_id` and verifier identity
+are. Authentication is relative to the caller's configured trust root; it is
+not provider attestation. The receipt schema is
+[`schemas/fork-receipt-v1.schema.json`](../schemas/fork-receipt-v1.schema.json).
+The checked-in
+[`evidence/post-oracle-fork-v1`](../evidence/post-oracle-fork-v1/) fixture
+exercises this path offline and verifies that a committed recorded oracle was
+served without another call.
+
 ### Selectors
 
 `run.events` resolves human intent to real event ids:

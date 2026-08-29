@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yoheinakajima/activegraph-bridge/schemas/fork-receipt-v1.schema.json",
+  "title": "ActiveGraph Bridge Fork Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "parent_run_id",
+    "child_run_id",
+    "forked_before_event_id",
+    "copied_through_event_id",
+    "parent_event_count_at_fork",
+    "prefix_event_count",
+    "parent_log_hash_at_fork",
+    "prefix_hash",
+    "child_log_hash_before_receipt",
+    "source_fingerprint",
+    "target_fingerprint",
+    "target_environment",
+    "environment_verified",
+    "environment_verifier",
+    "inherited_effects",
+    "served_effect_request_ids",
+    "prefix_external_calls",
+    "tail_executed_effect_request_ids",
+    "zero_reexecution_verified",
+    "external_continuation",
+    "status",
+    "created_at",
+    "receipt_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "activegraph-bridge/fork-receipt-v1"},
+    "parent_run_id": {"type": "string", "minLength": 1},
+    "child_run_id": {"type": "string", "minLength": 1},
+    "forked_before_event_id": {"type": "string", "minLength": 1},
+    "copied_through_event_id": {"type": "string", "minLength": 1},
+    "parent_event_count_at_fork": {"type": "integer", "minimum": 1},
+    "prefix_event_count": {"type": "integer", "minimum": 1},
+    "parent_log_hash_at_fork": {"$ref": "#/$defs/sha256"},
+    "prefix_hash": {"$ref": "#/$defs/sha256"},
+    "child_log_hash_before_receipt": {"$ref": "#/$defs/sha256"},
+    "source_fingerprint": {"type": "object"},
+    "target_fingerprint": {"type": "object"},
+    "target_environment": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/environment"}]
+    },
+    "environment_verified": {"type": "boolean"},
+    "environment_verifier": {"type": ["string", "null"]},
+    "inherited_effects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/effect"}
+    },
+    "served_effect_request_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "prefix_external_calls": {"type": "integer", "minimum": 0},
+    "tail_executed_effect_request_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "zero_reexecution_verified": {"type": "boolean"},
+    "external_continuation": {
+      "enum": ["verified", "conditional", "refused"]
+    },
+    "status": {"enum": ["completed", "failed", "unknown"]},
+    "created_at": {"type": "string", "minLength": 1},
+    "receipt_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "environment": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "algorithm",
+        "environment_id",
+        "snapshot_id",
+        "issuer",
+        "key_id",
+        "issued_at",
+        "claims",
+        "signature"
+      ]
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_event_id",
+        "outcome_event_id",
+        "kind",
+        "name",
+        "footprint",
+        "replay_source",
+        "lifecycle",
+        "observables",
+        "request_hash",
+        "response_hash"
+      ],
+      "properties": {
+        "request_event_id": {"type": "string"},
+        "outcome_event_id": {"type": ["string", "null"]},
+        "kind": {"type": "string"},
+        "name": {"type": "string"},
+        "footprint": {
+          "enum": ["pure", "idempotent", "compensatable", "one_shot", "unknown"]
+        },
+        "replay_source": {"enum": ["deterministic", "recorded", "uncaptured"]},
+        "lifecycle": {"enum": ["requested", "committed", "failed", "unknown"]},
+        "observables": {"type": "array", "items": {"type": "string"}},
+        "request_hash": {"type": "string"},
+        "response_hash": {"type": "string"}
+      }
+    }
+  }
+}

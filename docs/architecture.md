@@ -101,6 +101,13 @@ One machine, three shapes:
 - `fork_execute` / `afork_execute` — prefix cursor over the child's
   inherited events, override application, live tail into the child store.
 
+Successful forks append a hash-bound `bridge.fork_receipt`. It records the
+copied prefix, source and target fingerprints, inherited effect descriptors,
+served request identities, zero prefix external calls, tail executions, and
+the result of target-environment verification. Receipt verification is a pure
+operation over the parent events, child events, receipt, and configured trust
+root.
+
 Verification and forking **re-execute real agent code**. That is
 deliberate: re-execution is what reconstructs hidden Python state
 (message lists, framework internals) that no log can carry — strategy

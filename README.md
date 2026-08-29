@@ -19,6 +19,33 @@ alternative_answer = fork.execute()
 print(run.diff(fork))
 ```
 
+For a post-effect continuation claim, bind the target environment and retain
+the emitted receipt:
+
+```python
+from activegraph_bridge import HmacEnvironmentAttestor, verify_fork_receipt
+
+fork = run.fork(before=run.events.tool_call("next_step"))
+attestor = HmacEnvironmentAttestor(secret, issuer="runtime", key_id="prod-v1")
+environment = attestor.issue(
+    environment_id="fork-worker-7",
+    snapshot_id="snapshot-42",
+    claims=fork.environment_claims(),
+)
+fork.execute(
+    target_environment=environment,
+    environment_verifier=attestor,
+)
+receipt = fork.receipt
+assert receipt.zero_reexecution_verified
+assert receipt.external_continuation == "verified"
+```
+
+The receipt hash-binds the copied prefix and child log, names every inherited
+effect served from the record, records zero prefix external calls, and carries
+the verified target-environment attestation. Without an attestation the bridge
+still emits a receipt, but its continuation verdict remains `conditional`.
+
 Your agent keeps its own orchestration, prompts, loops, and framework
 control flow. The bridge mediates what the agent *does* — model calls,
 tool calls, retrieval, time, randomness, identifiers, external writes,
@@ -108,6 +135,11 @@ During `fork.execute()` the write tool `send_email` **cannot fire** —
 fork tails fail closed on writes unless you simulate, approve, or pass
 `side_effects="live"` explicitly.
 
+Provider-model calls are recorded as `one_shot + recorded`: their response can
+be served during a prefix, but a new model call in a fork tail is blocked by
+default. Set `SideEffectPolicy(on_fork_one_shot="execute")` only when the new
+oracle interaction and cost are explicitly authorized.
+
 ## The four operations, and what each honestly promises
 
 | Operation | What happens | Executes agent code? | Live calls? |
@@ -163,16 +195,17 @@ Blockers:
 
 ## Side effects fail closed
 
-Reads and writes are not treated alike. Effects declare
-`side_effect="read" | "write" | "unknown"` (unknown is conservatively a
-write where it matters):
+Effects retain the backward-compatible execution policy
+`side_effect="read" | "write" | "unknown"`, and additionally record three
+semantic dimensions: external footprint, replay source, and lifecycle. They
+also carry observable tags for property-scoped world claims.
 
 | Mode | Read | Write |
 | --- | --- | --- |
 | Live record | execute + record | execute per policy (`execute` / `approval` / `simulate` / `block`) |
 | Verify / replay | served from record | **never executes** |
 | Fork prefix | served from record | **never executes** |
-| Fork tail | execute + record | **blocked** by default; `simulate` / `approval` via policy; live only with `side_effects="live"` |
+| Fork tail | execute + record, except `one_shot` reads such as model calls are blocked by default | **blocked** by default; `simulate` / `approval` via policy; live only with `side_effects="live"` |
 
 Writes record idempotency keys, approval identity, and whether they
 actually committed. A blocked write is an `effect.failed` event in the
@@ -256,19 +289,25 @@ distinguishable from a changed-code counterfactual — code changes are a
 - [Integration grades](docs/grades.md) — how grades are computed, raising yours
 - [Side-effect policy](docs/side-effects.md) — fail-closed writes, simulation, approval
 - [Determinism](docs/determinism.md) — hazard detection, deterministic sources, fingerprints
+- [Fork receipts](docs/replay-verify-fork.md#fork-receipts) — environment binding and zero-reexecution evidence
 - [Error catalog](docs/errors.md)
 
 Runnable examples (offline, no API keys) live in [`examples/`](examples/).
 
 ## Status
 
-v0.1 — the core semantics, proven by an uncompromising test suite
+v0.2 — the core semantics and portable receipt path, checked by an uncompromising test suite
 (strict verification makes zero live calls; forks preserve verified
 prefixes; unrecorded I/O blocks the verified badge; writes cannot fire
-during replay or normal forks; fresh-process verification reproduces
-output and graph). Framework adapters (LangGraph, CrewAI, …), SDK
-stream capture, and Postgres stores are the next ring outward — see
+during replay or normal forks; inherited one-shot effects are served from the
+record; target environments and child logs are hash-bound in fork receipts;
+fresh-process verification reproduces output and graph). Framework adapters
+(LangGraph, CrewAI, …) and Postgres stores are the next ring outward — see
 [docs/architecture.md](docs/architecture.md#extension-points).
+
+The checked-in [post-oracle fixture](evidence/post-oracle-fork-v1/) is an
+offline, language-neutral witness: one committed recorded oracle interaction,
+one actual child fork, and zero inherited external calls.
 
 ## License
 
